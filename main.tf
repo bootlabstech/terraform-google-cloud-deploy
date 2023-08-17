@@ -63,7 +63,7 @@ main:
             - image_tag: $${image_url_path_array[len(image_url_path_array) - 1]}
             - repository_name: $${image_url_path_array[len(image_url_path_array) - 3]}
             - image_location: $${location_id + "-docker.pkg.dev/" + project_id + "/" + repository_name + "/" + image_tag}
-            - target_cluster: 
+            - target_cluster: ${var.cluster}
             - time_string: $${text.replace_all(text.replace_all(text.split(time.format(sys.now()), ".")[0], "-", ""), ":", "")}
             - tag_string: $${text.split(image_tag, "@")[0]}
             - requestId: $${text.to_lower(tag_string) + text.to_lower(time_string)}
