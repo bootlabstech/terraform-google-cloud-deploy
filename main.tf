@@ -1,47 +1,37 @@
-resource "google_clouddeploy_delivery_pipeline" "primary_pipeline" {
-  name        = var.delivery_pipeline_name
-  location    = var.location
+
+
+resource "google_clouddeploy_delivery_pipeline" "delivery_pipeline" {
+  for_each    = toset(var.anthos_target_cluster_membership)
+  location    = var.region
+  name        = "${var.delivery_pipeline_name}-${each.key}"
+  description = "${each.key} delivery pipeline."
   project     = var.project_id
-  description = var.description
-  labels      = length(keys(var.labels)) < 0 ? null : var.labels
-  annotations = length(keys(var.annotations)) < 0 ? null : var.annotations
-
-  dynamic "serial_pipeline" {
-    for_each = var.enable_serial_pipeline ? [{}] : []
-    content {
-      stages {
-        profiles  = var.stages_profiles
-        target_id = var.target_id
-      }
+  serial_pipeline {
+    stages {
+      profiles  = []
+      target_id = google_clouddeploy_target.dev[each.key].name
     }
   }
 }
 
-resource "google_clouddeploy_target" "target" {
-  name             = var.target_id
-  location         = var.location
-  project          = var.project_id
-  description      = var.description
-  labels           = length(keys(var.labels)) < 0 ? null : var.labels
-  annotations      = length(keys(var.annotations)) < 0 ? null : var.annotations
-  require_approval = var.require_approval
-
-  dynamic "gke" {
-    for_each = var.enable_gke ? [{}] : []
-    content {
-      cluster = var.cluster
-    }
+resource "google_clouddeploy_target" "dev" {
+  for_each = toset(var.anthos_target_cluster_membership)
+  location = var.region
+  name     = each.key
+  project  = var.project_id
+  anthos_cluster {
+    membership = "projects/${var.project_id}/locations/global/memberships/${each.key}"
   }
-  depends_on = [
-    google_clouddeploy_delivery_pipeline.primary_pipeline
-  ]
+  require_approval = false
+  execution_configs {
+    usages          = ["RENDER", "DEPLOY"]
+    service_account = "viai-abm-service@${var.project_id}.iam.gserviceaccount.com"
+  }
 }
 
-
-
-resource "google_workflows_workflow" "event-trigger-destination1" {
-  # for_each        = toset(var.anthos_target_cluster_membership)
-  name            = "workflow"
+resource "google_workflows_workflow" "event-trigger-destination" {
+  for_each        = toset(var.anthos_target_cluster_membership)
+  name            = "workflow-${each.key}"
   project         = var.project_id
   region          = var.region
   service_account = "viai-model-deploy-service@${var.project_id}.iam.gserviceaccount.com"
@@ -53,7 +43,7 @@ main:
         assign:
           - project_id: ${var.project_id}
           - location_id: ${var.region}
-          - pipeline: ${var.project_id}
+          - pipeline: ${var.project_id}-${each.key}
     - decode_pubsub_message:
         assign:
             - data: $${event.data}
@@ -63,14 +53,14 @@ main:
             - image_tag: $${image_url_path_array[len(image_url_path_array) - 1]}
             - repository_name: $${image_url_path_array[len(image_url_path_array) - 3]}
             - image_location: $${location_id + "-docker.pkg.dev/" + project_id + "/" + repository_name + "/" + image_tag}
-            - target_cluster: ${var.cluster}
+            - target_cluster: ${each.key}
             - time_string: $${text.replace_all(text.replace_all(text.split(time.format(sys.now()), ".")[0], "-", ""), ":", "")}
             - tag_string: $${text.split(image_tag, "@")[0]}
             - requestId: $${text.to_lower(tag_string) + text.to_lower(time_string)}
     - cloud_deploy:
         call: http.post
         args:
-          url: $${"https://clouddeploy.googleapis.com/v1/projects/${var.project_id}/locations/${var.region}/deliveryPipelines/${google_clouddeploy_delivery_pipeline.primary_pipeline.name}/releases?releaseId=" + requestId}
+          url: $${"https://clouddeploy.googleapis.com/v1/projects/${var.project_id}/locations/${var.region}/deliveryPipelines/${google_clouddeploy_delivery_pipeline.delivery_pipeline[each.key].name}/releases?releaseId=" + requestId}
           auth:
             type: OAuth2
             scopes: https://www.googleapis.com/auth/cloud-platform
@@ -86,9 +76,9 @@ main:
 }
 
 resource "google_eventarc_trigger" "artifact_registry_trigger" {
-
+  for_each = toset(var.anthos_target_cluster_membership)
   location = var.region
-  name     = "event-trigger"
+  name     = "${each.key}-event-trigger"
   project  = var.project_id
 
   matching_criteria {
@@ -109,11 +99,11 @@ resource "google_eventarc_trigger" "artifact_registry_trigger" {
     value     = "/projects/${var.project_id}/locations/${var.region}/repositories/${var.region}-viai-models/dockerImages/*"
   }
   destination {
-    workflow = google_workflows_workflow.event-trigger-destination1.id
+    workflow = google_workflows_workflow.event-trigger-destination[each.key].id
   }
   service_account = "viai-model-deploy-service@${var.project_id}.iam.gserviceaccount.com"
   depends_on = [
-    google_workflows_workflow.event-trigger-destination1,
-    google_clouddeploy_delivery_pipeline.primary_pipeline
+    google_workflows_workflow.event-trigger-destination,
+    google_clouddeploy_delivery_pipeline.delivery_pipeline
   ]
 }
